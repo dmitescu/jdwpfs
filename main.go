@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0
+// Copyright (C) 2022 jdwpfs Authors M. G. Dan
+
 package main
 
 import (

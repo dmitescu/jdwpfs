@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0
+// Copyright (C) 2022 jdwpfs Authors M. G. Dan
+
 package fs
 
 import (
@@ -426,6 +429,7 @@ func (c *ThreadControlFile) Setattr(ctx context.Context, _ fs.FileHandle, in *fu
 func (c *ThreadControlFile) Read(ctx context.Context, _ fs.FileHandle, dest []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	_, suspendStatus, err := c.JdwpConnection.GetThreadStatus(c.ThreadId)
 	if err != nil {
 		return nil, syscall.EACCES
@@ -450,7 +454,6 @@ func (c *ThreadControlFile) Read(ctx context.Context, _ fs.FileHandle, dest []by
 	return fuse.ReadResultData(output), 0
 }
 
-// mostly doesn't work, truncation has to be implemented
 func (c *ThreadControlFile) Write(ctx context.Context, _ fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
