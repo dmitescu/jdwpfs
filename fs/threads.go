@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"syscall"
 	"log"
+	"strings"
+	"sync"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -58,6 +60,7 @@ func (d *JdwpThreadMasterDir) Getattr(ctx context.Context, fh fs.FileHandle, out
 }
 
 func (d *JdwpThreadMasterDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	// thread directories
 	threadIds, err := d.JdwpConnection.GetAllThreads()
 	if err != nil {
 		log.Println("unable to read threads from the JVM")
@@ -74,11 +77,32 @@ func (d *JdwpThreadMasterDir) Readdir(ctx context.Context) (fs.DirStream, syscal
 		threadDirEntries =
 			append(threadDirEntries, newThreadDir.GetDirEntry(ctx))
 	}
+
+	// master control file
+	masterControlEntry := fuse.DirEntry {
+		Mode: fuse.S_IFREG,
+		Name: "control",
+	}
+	
+	threadDirEntries = append(threadDirEntries, masterControlEntry)
 	
 	return fs.NewListDirStream(threadDirEntries), 0
 }
 
 func (d *JdwpThreadMasterDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if name == "control" {
+		masterControlFile := NewThreadMasterControlFile(d.JdwpContext, d.JdwpConnection)
+		masterControlInode := d.NewInode(
+			ctx,
+			&masterControlFile,
+			fs.StableAttr{
+				Mode: fuse.S_IFREG,
+			},
+		)
+
+		return masterControlInode, syscall.F_OK
+	}
+	
 	threadId, err := strconv.ParseUint(name, 10, 64)
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -226,18 +250,130 @@ func (d *JdwpThreadDir) Lookup(ctx context.Context, name string, out *fuse.Entry
 	}
 }
 
+
+//
+// Thread master control file
+//
+type ThreadMasterControlFile struct {
+	fs.Inode
+
+	mu sync.Mutex
+	
+	ThreadId jdwp.ThreadID
+	JdwpContext context.Context
+	JdwpConnection *jdwp.Connection
+}
+
+var _ = (fs.NodeGetattrer)((*ThreadMasterControlFile)(nil))
+var _ = (fs.NodeSetattrer)((*ThreadMasterControlFile)(nil))
+var _ = (fs.NodeOpener)((*ThreadMasterControlFile)(nil))
+var _ = (fs.NodeReader)((*ThreadMasterControlFile)(nil))
+var _ = (fs.NodeWriter)((*ThreadMasterControlFile)(nil))
+
+func NewThreadMasterControlFile(ctx context.Context, conn *jdwp.Connection) ThreadMasterControlFile {
+	return ThreadMasterControlFile {
+		JdwpContext: ctx,
+		JdwpConnection: conn,
+	}
+}
+
+func (c *ThreadMasterControlFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if flags & (
+		syscall.O_APPEND |
+		syscall.O_CLOEXEC |
+		syscall.O_EXCL |
+		syscall.O_NOCTTY) != 0 {
+		return nil, 0, syscall.EBADR
+	}
+
+	return nil, fuse.FOPEN_DIRECT_IO, 0
+}
+
+func (c *ThreadMasterControlFile) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out.Mode = 0660
+	return 0
+}
+
+func (c *ThreadMasterControlFile) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if sz, _ := in.GetSize(); sz != 0 {
+		return syscall.EBADR
+	}
+	
+	out.Attr.Mode = in.Mode
+	out.Atime = in.Atime
+	out.Atimensec = in.Atimensec
+	// out.Size = in.Size
+
+	return syscall.F_OK	
+}
+
+func (c *ThreadMasterControlFile) Read(ctx context.Context, _ fs.FileHandle, dest []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
+	if offset > 0 {
+		return nil, syscall.EBADR
+	}
+
+	output := []byte("")
+
+	return fuse.ReadResultData(output), 0
+}
+
+// mostly doesn't work, truncation has to be implemented
+func (c *ThreadMasterControlFile) Write(ctx context.Context, _ fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var err error
+	var writtenState jdwp.SuspendStatus
+        switch strings.TrimSpace(string(data)) {
+	case "running":
+	case "1":
+		writtenState = 1
+	case "suspend":
+	case "0":
+		writtenState = 0
+	default:
+		return 0, syscall.EFAULT
+	}
+
+	switch writtenState {
+	case 0:
+		err = c.JdwpConnection.SuspendAll()
+	case 1:
+		err = c.JdwpConnection.ResumeAll()
+	default:
+		return 0, syscall.EFAULT
+	}
+
+	if err != nil {
+		log.Printf("error changing state for all threads: %s", err)
+		return 0, syscall.EFAULT
+	}
+	
+	return uint32(len(data)), 0
+}
+
 //
 // Thread control file
 //
 type ThreadControlFile struct {
 	fs.Inode
 
+	mu sync.Mutex
+	
 	ThreadId jdwp.ThreadID
 	JdwpContext context.Context
 	JdwpConnection *jdwp.Connection
 }
 
 var _ = (fs.NodeGetattrer)((*ThreadControlFile)(nil))
+var _ = (fs.NodeSetattrer)((*ThreadControlFile)(nil))
 var _ = (fs.NodeOpener)((*ThreadControlFile)(nil))
 var _ = (fs.NodeReader)((*ThreadControlFile)(nil))
 var _ = (fs.NodeWriter)((*ThreadControlFile)(nil))
@@ -251,6 +387,8 @@ func NewThreadControlFile(ctx context.Context, conn *jdwp.Connection, id jdwp.Th
 }
 
 func (c *ThreadControlFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if flags & (
 		syscall.O_APPEND |
 		syscall.O_CLOEXEC |
@@ -262,13 +400,32 @@ func (c *ThreadControlFile) Open(ctx context.Context, flags uint32) (fh fs.FileH
 	return nil, fuse.FOPEN_DIRECT_IO, 0
 }
 
-func (d *ThreadControlFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	out.Mode = 0666
-	out.Uid = 1000
+func (c *ThreadControlFile) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out.Mode = 0660
 	return 0
 }
 
+func (c *ThreadControlFile) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if sz, _ := in.GetSize(); sz != 0 {
+		return syscall.EBADR
+	}
+	
+	out.Attr.Mode = in.Mode
+	out.Atime = in.Atime
+	out.Atimensec = in.Atimensec
+	// out.Size = in.Size
+
+	return syscall.F_OK	
+}
+
 func (c *ThreadControlFile) Read(ctx context.Context, _ fs.FileHandle, dest []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	_, suspendStatus, err := c.JdwpConnection.GetThreadStatus(c.ThreadId)
 	if err != nil {
 		return nil, syscall.EACCES
@@ -295,45 +452,41 @@ func (c *ThreadControlFile) Read(ctx context.Context, _ fs.FileHandle, dest []by
 
 // mostly doesn't work, truncation has to be implemented
 func (c *ThreadControlFile) Write(ctx context.Context, _ fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	_, suspendStatus, err := c.JdwpConnection.GetThreadStatus(c.ThreadId)
 	if err != nil {
 		return 0, syscall.EACCES
 	}
 
 	var writtenState jdwp.SuspendStatus
-	var changed = false
-        switch string(data) {
+        switch strings.TrimSpace(string(data)) {
 	case "running":
 	case "1":
-	case "running\n":
-	case "1\n":
 		writtenState = 1
 	case "suspend":
 	case "0":
-	case "suspend\n":
-	case "0\n":
 		writtenState = 0
 	default:
 		return 0, syscall.EFAULT
 	}
 
-	log.Printf("written state: %d\n", writtenState)
 	if suspendStatus != writtenState {
-		changed = true
 		switch writtenState {
 		case 0:
-			c.JdwpConnection.Suspend(c.ThreadId)
+			err = c.JdwpConnection.Suspend(c.ThreadId)
 		case 1:
-			c.JdwpConnection.Resume(c.ThreadId)
+			err = c.JdwpConnection.Resume(c.ThreadId)
 		default:
 			return 0, syscall.EFAULT
 			
 		}
 	}
 
-	if changed {
-		return uint32(len(data)), 0
-	} else {
-		return 0, 0
+	if err != nil {
+		log.Printf("error changing state: %s", err)
+		return 0, syscall.EFAULT
 	}
+	
+	return uint32(len(data)), 0
 }
