@@ -57,7 +57,7 @@ func NewJdwpThreadMasterDir(ctx context.Context, conn *jdwp.Connection) (*JdwpTh
 	return newThreadDir, nil
 }
 
-func (d *JdwpThreadMasterDir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+func (d *JdwpThreadMasterDir) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0755
 	return 0
 }
@@ -67,7 +67,7 @@ func (d *JdwpThreadMasterDir) Readdir(ctx context.Context) (fs.DirStream, syscal
 	threadIds, err := d.JdwpConnection.GetAllThreads()
 	if err != nil {
 		log.Println("unable to read threads from the JVM")
-		return nil, syscall.EADDRNOTAVAIL
+		return nil, syscall.EFAULT
 	}
 
 	var threadDirEntries []fuse.DirEntry
@@ -75,7 +75,7 @@ func (d *JdwpThreadMasterDir) Readdir(ctx context.Context) (fs.DirStream, syscal
 		newThreadDir, err := NewJdwpThreadDir(d.JdwpContext, d.JdwpConnection, threadId)
 		if err != nil {
 			log.Printf("error creating thread dir: %s", err)
-			return nil, syscall.EADDRNOTAVAIL
+			return nil, syscall.EFAULT
 		}
 		threadDirEntries =
 			append(threadDirEntries, newThreadDir.GetDirEntry(ctx))
@@ -193,10 +193,10 @@ func (d *JdwpThreadDir) Lookup(ctx context.Context, name string, out *fuse.Entry
 			ctx,
 			&fs.MemRegularFile {
 				Data: []byte(threadName),
-					Attr: fuse.Attr{
-						Mode: 0444,
-					},
+				Attr: fuse.Attr{
+					Mode: 0444,
 				},
+			},
 			fs.StableAttr {
 				Mode: fuse.S_IFREG,
 			})
@@ -212,10 +212,10 @@ func (d *JdwpThreadDir) Lookup(ctx context.Context, name string, out *fuse.Entry
 			ctx,
 			&fs.MemRegularFile {
 				Data: []byte(threadStatus.String()),
-					Attr: fuse.Attr{
-						Mode: 0444,
-					},
+				Attr: fuse.Attr{
+					Mode: 0444,
 				},
+			},
 			fs.StableAttr {
 				Mode: fuse.S_IFREG,
 			})
@@ -231,10 +231,10 @@ func (d *JdwpThreadDir) Lookup(ctx context.Context, name string, out *fuse.Entry
 			ctx,
 			&fs.MemRegularFile {
 				Data: []byte(suspendStatus.String()),
-					Attr: fuse.Attr{
-						Mode: 0444,
-					},
+				Attr: fuse.Attr{
+					Mode: 0444,
 				},
+			},
 			fs.StableAttr {
 				Mode: fuse.S_IFREG,
 			})

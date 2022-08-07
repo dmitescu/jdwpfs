@@ -131,6 +131,27 @@ func (r *JdwpRootFs) OnAdd(ctx context.Context) {
 			Mode: fuse.S_IFDIR,
 			Ino: 5,
 		})
+
+	// classes dir
+	classesDir, err := NewJdwpClassMasterDir(r.JdwpContext, r.JdwpConnection)
+	classesDirInode := r.NewPersistentInode(
+		ctx,
+		classesDir,
+		fs.StableAttr{
+			Mode: fuse.S_IFDIR,
+			Ino: 6,
+		})
+
+	// named classes dir
+	classesNamedDir, err := NewJdwpClassNamedMasterDir(r.JdwpContext, r.JdwpConnection, r.AbsoluteMountpoint)
+	classesNamedDirInode := r.NewPersistentInode(
+		ctx,
+		classesNamedDir,
+		fs.StableAttr{
+			Mode: fuse.S_IFDIR,
+			Ino: 7,
+		})
+
 	
 	// hooking files
 	r.AddChild("host", hostFile, false)
@@ -138,6 +159,9 @@ func (r *JdwpRootFs) OnAdd(ctx context.Context) {
 
 	r.AddChild("threads", threadMasterDirInode, false)
 	r.AddChild("threads_by_name", threadNamedDirInode, false)
+
+	r.AddChild("classes", classesDirInode, false)
+	r.AddChild("classes_by_signature", classesNamedDirInode, false)
 }
 
 func (r *JdwpRootFs) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
