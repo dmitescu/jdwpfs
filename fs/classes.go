@@ -93,7 +93,7 @@ func (d *JdwpClassMasterDir) Lookup(ctx context.Context, name string, out *fuse.
 	if err != nil {
 		log.Printf("could not access class with id %d\n", classId)
 		return nil, syscall.ENOENT
-	}	
+	}
 	
 	classEntryInode := d.NewInode(
 		ctx,

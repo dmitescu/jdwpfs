@@ -74,7 +74,7 @@ func (c *JdwpClassInfoDir) Getattr(ctx context.Context, _ fs.FileHandle, out *fu
 }
 
 func (d *JdwpClassInfoDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	classDirContents := [...]string{"methodInfo", "fieldInfo", "methods", "fields"}
+	classDirContents := [...]string{"signature", "methodInfo", "fieldInfo", "methods", "fields"}
 	var infoFiles []fuse.DirEntry
 	for _, infoFileName := range classDirContents {
 		infoFileEntry := fuse.DirEntry {
@@ -89,6 +89,41 @@ func (d *JdwpClassInfoDir) Readdir(ctx context.Context) (fs.DirStream, syscall.E
 
 func (d *JdwpClassInfoDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	switch name {
+	case "signature":
+		classes, err := d.JdwpConnection.GetAllClasses()
+		if err != nil {
+			log.Println("could not retrieve classes")
+			return nil, syscall.EFAULT
+		}
+
+		var class jdwp.ClassInfo
+		var classFound bool = false
+
+		for _, foundClass := range classes {
+			if foundClass.TypeID == d.TypeId {
+				class = foundClass
+				classFound = true
+			}
+		}
+
+		if !classFound {
+			log.Printf("class with id %d not found\n", d.TypeId)
+			return nil, syscall.EFAULT
+		}
+
+
+		nameFileInode := d.NewInode(
+			ctx,
+			&fs.MemRegularFile {
+				Data: []byte(class.Signature),
+				Attr: fuse.Attr{
+					Mode: 0444,
+				},
+			},
+			fs.StableAttr {
+				Mode: fuse.S_IFREG,
+			})
+		return nameFileInode, syscall.F_OK
 	case "methodInfo":
 		methods, err := d.JdwpConnection.GetMethods(d.TypeId)
 		if err != nil {

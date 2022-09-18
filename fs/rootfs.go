@@ -62,7 +62,7 @@ func NewJdwpRootfs(ctx context.Context, absMountpoint string, host string, port 
 
 	if host == "" {
 		return nil, JdwpProtocolError {
-			message: fmt.Sprintf("host '%s' cannot exist", host),
+			message: fmt.Sprintf("host %s cannot exist", host),
 		}
 	}
 
@@ -134,6 +134,10 @@ func (r *JdwpRootFs) OnAdd(ctx context.Context) {
 
 	// classes dir
 	classesDir, err := NewJdwpClassMasterDir(r.JdwpContext, r.JdwpConnection)
+	if err != nil {
+		log.Panicf("could not create named classes dir: %s", err)
+	}
+	
 	classesDirInode := r.NewPersistentInode(
 		ctx,
 		classesDir,
@@ -144,6 +148,10 @@ func (r *JdwpRootFs) OnAdd(ctx context.Context) {
 
 	// named classes dir
 	classesNamedDir, err := NewJdwpClassNamedMasterDir(r.JdwpContext, r.JdwpConnection, r.AbsoluteMountpoint)
+	if err != nil {
+		log.Panicf("could not create named events dir: %s", err)
+	}
+	
 	classesNamedDirInode := r.NewPersistentInode(
 		ctx,
 		classesNamedDir,
@@ -151,6 +159,17 @@ func (r *JdwpRootFs) OnAdd(ctx context.Context) {
 			Mode: fuse.S_IFDIR,
 			Ino: 7,
 		})
+
+	// events directory
+	eventsDir, err := NewJdwpEventsMasterDir(r.JdwpContext, r.JdwpConnection, r.AbsoluteMountpoint)
+	eventsDirInode := r.NewPersistentInode(
+		ctx,
+		eventsDir,
+		fs.StableAttr{
+			Mode: fuse.S_IFDIR,
+			Ino: 8,
+		})
+	
 
 	
 	// hooking files
@@ -162,6 +181,8 @@ func (r *JdwpRootFs) OnAdd(ctx context.Context) {
 
 	r.AddChild("classes", classesDirInode, false)
 	r.AddChild("classes_by_signature", classesNamedDirInode, false)
+
+	r.AddChild("events", eventsDirInode, false)
 }
 
 func (r *JdwpRootFs) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
