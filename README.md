@@ -44,16 +44,11 @@ mnt -- host
     |- classes_by_signature -- A         symlinks to classes
     |                       \...
     |- events -- custom event 1 -- control          event control
-    |         |                 |- kind             kind
-    |         |                 |- suspendPolicy    suspend policy
-    |         |                 |- location         location directory
-    |         |                 \- hooks            hooks directory
-    |         \...
-    |
-    |- hooks  -- hook 1 -- script.go     JIT'ed Go hooks to run
-    |                   |- breakpoint    symlink to the breakpoint
-    |                   \. method        symlink to the method
-    \...
+              |                 |- kind             kind
+              |                 |- suspendPolicy    suspend policy
+              |                 |- location         location directory
+              |                 \- hooks            hooks directory
+              \...
     
 ```
 
