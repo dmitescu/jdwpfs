@@ -6,11 +6,9 @@ package fs
 import (
 	"context"
 	"log"
-	// "os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 
 	"disroot.org/kitzman/jdwpfs/debug"
@@ -315,12 +313,6 @@ type EventLocationDirectory struct {
 	JdwpConnection *jdwp.Connection
 	event *debug.DebuggingEvent
 	absoluteMountpoint string
-
-	mu sync.RWMutex
-	links [](struct {
-		name string
-		target string
-	})
 }
 
 var _ = (fs.NodeGetattrer)((*EventLocationDirectory)(nil))
@@ -333,12 +325,7 @@ func NewEventLocationDirectory(event *debug.DebuggingEvent, conn *jdwp.Connectio
 	return EventLocationDirectory {
 		event: event,
 		JdwpConnection: conn,
-		mu: sync.RWMutex{},
 		absoluteMountpoint: absMountpoint,	
-		links: [](struct {
-			name string
-			target string
-		}){},
 	}
 }
 
@@ -348,14 +335,11 @@ func (d *EventLocationDirectory) Getattr(ctx context.Context, fh fs.FileHandle, 
 }
 
 func (d *EventLocationDirectory) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	var entries = []fuse.DirEntry{}
-	for _, link := range d.links {
+	for _, modifier := range d.event.GetModifiers() {
 		newEntry := fuse.DirEntry {
 			Mode: fuse.S_IFLNK,
-			Name: link.name,
+			Name: modifier.Name,
 		}
 		entries = append(entries, newEntry)
 	}
@@ -394,15 +378,15 @@ func (d *EventLocationDirectory) Symlink(ctx context.Context, target, name strin
 		return nil, syscall.EBADE
 	}
 
-	var newModifier jdwp.EventModifier
-
 	classId, err := strconv.ParseUint(pathComponents[1], 10, 64)
 	if err != nil {
 		log.Printf("target %s has unparsable class id\n", target)
 		return nil, syscall.EBADE
 	}
-
+	
+	var isField = true
 	var foundClass *jdwp.ClassInfo = nil
+	var objectId uint64
 	classes, err := d.JdwpConnection.GetAllClasses()
 	if err != nil {
 		log.Printf("unable to retrieve classes for target %s\n", target)
@@ -418,7 +402,7 @@ func (d *EventLocationDirectory) Symlink(ctx context.Context, target, name strin
 		log.Printf("unable to find a valid class for target %s\n", target)
 		return nil, syscall.ENOENT
 	}
-	
+
 	switch (pathComponents[2]) {
 	case "fields":
 		fieldId, err := strconv.ParseUint(pathComponents[3], 10, 64)
@@ -426,7 +410,6 @@ func (d *EventLocationDirectory) Symlink(ctx context.Context, target, name strin
 			log.Printf("target %s has unparsable field id\n", target)
 			return nil, syscall.EBADE
 		}
-
 
 		var foundField *jdwp.Field = nil
 		fields, err := d.JdwpConnection.GetFields(jdwp.ReferenceTypeID(classId))
@@ -445,10 +428,8 @@ func (d *EventLocationDirectory) Symlink(ctx context.Context, target, name strin
 			return nil, syscall.ENOENT
 		}
 
-		newModifier = jdwp.FieldOnlyEventModifier {
-			Type: foundClass.TypeID,
-			Field: foundField.ID,
-		}
+		isField = true
+		objectId = fieldId
 	case "methods":
 		methodId, err := strconv.ParseUint(pathComponents[3], 10, 64)
 		if err != nil {
@@ -473,22 +454,24 @@ func (d *EventLocationDirectory) Symlink(ctx context.Context, target, name strin
 			log.Printf("unable to find matching method for target %s\n", target)
 			return nil, syscall.ENOENT
 		}
-
-		newModifier = jdwp.LocationOnlyEventModifier(jdwp.Location {
-			Type: foundClass.Kind,
-			Class: foundClass.ClassID(),
-			Method: foundMethod.ID,
-			Location: 0,
-		})
+		
+		isField = false
+		objectId = methodId
 	default:
 		log.Printf("target %s is not available", target)
 		return nil, syscall.EADDRNOTAVAIL
 	}
+
+	newModifier := debug.ModifierDescriptor {
+		Name: name,
+		IsField: isField,
+		Kind: foundClass.Kind,
+		ClassId: classId,
+		ObjectId: objectId,
+	}
+	
 	d.event.SetModifier(name, newModifier)
-	
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	
+		
 	newLink := d.NewInode(
 		ctx,
 		&fs.MemSymlink {
@@ -498,66 +481,55 @@ func (d *EventLocationDirectory) Symlink(ctx context.Context, target, name strin
 		fs.StableAttr {
 			Mode: fuse.S_IFLNK,
 	})
-
-	d.links = append(d.links, struct {
-		name string
-		target string
-	}{
-		name: name,
-		target: target,
-	})
 	
 	return newLink, syscall.F_OK
 }
 
 func (d *EventLocationDirectory) Unlink(ctx context.Context, name string) syscall.Errno {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	var foundLinkIndex int
-	var foundLink *struct {
-		name string
-		target string
-	}
-	for i, link := range d.links {
-		if link.name == name {
-			foundLink = &link
-			foundLinkIndex = i
-		}
-	}
-	if foundLink == nil {
+	_, ok := d.event.GetHookDescriptors()[name]
+	if !ok {
 		return syscall.ENOENT
 	}
-
-	d.links = append(
-		d.links[:foundLinkIndex],
-		d.links[(foundLinkIndex + 1):]...)
+	
+	err := d.event.DeleteModifier(name)
+	if err != nil {
+		return syscall.EACCES
+	}
 	
 	return syscall.F_OK
 }
 
 func (d *EventLocationDirectory) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	var foundLink *struct {
-		name string
-		target string
-	}
-	for _, link := range d.links {
-		if link.name == name {
-			foundLink = &link
-		}
-	}
-
-	if foundLink == nil {
+	modifier, ok := d.event.GetModifiers()[name]
+	if !ok {
 		return nil, syscall.ENOENT
 	}
+
+	classDirName := strconv.FormatUint(uint64(modifier.ClassId), 10)
+	objectSubdir := strconv.FormatUint(modifier.ObjectId, 10)
+	var mountpoint = d.absoluteMountpoint
+	mountpoint = strings.TrimRight(mountpoint, "/")
+	var classSubDir = ""
+	var target = ""
+
+	switch modifier.IsField {
+	case true:
+		classSubDir = "fields"
+	case false:
+		classSubDir = "methods"
+	}
 	
-	hookLink := d.NewInode(
+	target = strings.Join([]string {
+		mountpoint,
+		"classes",
+		classDirName,
+		classSubDir,
+		objectSubdir,
+	}, "/")
+	locationLink := d.NewInode(
 		ctx,
 		&fs.MemSymlink {
-			Data: []byte(foundLink.target),
+			Data: []byte(target),
 			Attr: fuse.Attr { Mode: 0444 },
 		},
 		fs.StableAttr{
@@ -565,7 +537,7 @@ func (d *EventLocationDirectory) Lookup(ctx context.Context, name string, out *f
 		},
 	)
 
-	return hookLink, syscall.F_OK
+	return locationLink, syscall.F_OK
 }
 
 
@@ -576,12 +548,6 @@ func (d *EventLocationDirectory) Lookup(ctx context.Context, name string, out *f
 type EventHooksDirectory struct {
 	fs.Inode
 	event *debug.DebuggingEvent
-
-	mu sync.RWMutex
-	links []struct {
-		name string
-		target string
-	}
 }
 
 var _ = (fs.NodeGetattrer)((*EventHooksDirectory)(nil))
@@ -592,11 +558,6 @@ var _ = (fs.NodeLookuper)((*EventHooksDirectory)(nil))
 func NewEventHooksDirectory(event *debug.DebuggingEvent) EventHooksDirectory {
 	return EventHooksDirectory {
 		event: event,
-		mu: sync.RWMutex{},
-		links: []struct {
-			name string
-			target string
-		}{},
 	}
 }
 
@@ -606,9 +567,6 @@ func (d *EventHooksDirectory) Getattr(ctx context.Context, fh fs.FileHandle, out
 }
 
 func (d *EventHooksDirectory) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (node *fs.Inode, errno syscall.Errno) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	
 	newLink := d.NewInode(
 		ctx,
 		&fs.MemSymlink {
@@ -619,26 +577,17 @@ func (d *EventHooksDirectory) Symlink(ctx context.Context, target, name string, 
 			Mode: fuse.S_IFLNK,
 	})
 
-	d.links = append(d.links, struct {
-		name string
-		target string
-	}{
-		name: name,
-		target: target,
-	})
+	d.event.SetHookDescriptor(name, target)
 	
 	return newLink, syscall.F_OK
 }
 
 func (d *EventHooksDirectory) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	var entries = []fuse.DirEntry{}
-	for _, link := range d.links {
+	for name, _ := range d.event.GetHookDescriptors() {
 		newEntry := fuse.DirEntry {
 			Mode: fuse.S_IFLNK,
-			Name: link.name,
+			Name: name,
 		}
 		entries = append(entries, newEntry)
 	}
@@ -647,16 +596,19 @@ func (d *EventHooksDirectory) Readdir(ctx context.Context) (fs.DirStream, syscal
 }
 
 func (d *EventHooksDirectory) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	var foundLink *struct {
 		name string
 		target string
 	}
-	for _, link := range d.links {
-		if link.name == name {
-			foundLink = &link
+	for descriptorName, descriptorTarget := range d.event.GetHookDescriptors() {
+		if descriptorName == name {
+			foundLink = &struct {
+				name string
+				target string
+			}{
+				name: descriptorName,
+				target: descriptorTarget,
+			}
 		}
 	}
 

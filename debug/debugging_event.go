@@ -5,24 +5,38 @@ package debug
 
 import (
 	"context"
-	"sync"
-	"log"
 	"fmt"
-	
+	"log"
+	"sync"
+
 	jdwp "github.com/omerye/gojdb/jdwp"
 )
+
+//
+// Modifier descriptor
+//
+type ModifierDescriptor struct {
+	Name string
+	Kind jdwp.TypeTag
+	IsField bool
+	ClassId uint64
+	ObjectId uint64
+}
+
+func (d ModifierDescriptor) ToModifier() jdwp.EventModifier {
+	return nil
+}
 
 //
 // Debugging Event
 //
 type DebuggingEvent struct {
 	Name string
-	Kind jdwp.EventKind
-	SuspendPolicy jdwp.SuspendPolicy
-	Modifiers map[string]jdwp.EventModifier
+	kind jdwp.EventKind
+	suspendPolicy jdwp.SuspendPolicy
+	modifierDescriptors map[string]ModifierDescriptor
+	hookDescriptors map[string]string
 	
-	hook func(jdwp.Event) bool
-
 	mu sync.RWMutex
 	registered bool
 	ctx context.Context
@@ -33,10 +47,10 @@ type DebuggingEvent struct {
 func NewStubDebuggingEvent(name string) *DebuggingEvent {
 	return &DebuggingEvent {
 		Name: name,
-		Kind: jdwp.VMDeath,
-		SuspendPolicy: jdwp.SuspendNone,
-		Modifiers: map[string]jdwp.EventModifier{},
-		hook: nil,
+		kind: jdwp.VMDeath,
+		suspendPolicy: jdwp.SuspendNone,
+		modifierDescriptors: map[string]ModifierDescriptor{},
+		hookDescriptors: map[string]string{},
 
 		mu: sync.RWMutex{},
 		registered: false,
@@ -50,21 +64,52 @@ func (e *DebuggingEvent) SetKind(kind jdwp.EventKind) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	
-	e.Kind = kind
+	e.kind = kind
 }
 
 func (e *DebuggingEvent) SetSuspendPolicy(policy jdwp.SuspendPolicy) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.SuspendPolicy = policy
+	e.suspendPolicy = policy
 }
 
-func (e *DebuggingEvent) SetModifier(name string, modifier jdwp.EventModifier) {
+// TODO maybe sanity checks?
+func (e *DebuggingEvent) SetHookDescriptor(name string, target string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.Modifiers[name] = modifier
+	_, ok := e.hookDescriptors[name]
+	if ok {
+		return false
+	}
+
+	e.hookDescriptors[name] = target
+
+	return true
+}
+
+func (e *DebuggingEvent) RemoveHookDescriptor(name string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	_, ok := e.hookDescriptors[name]
+	if !ok {
+		return false
+	}
+
+	delete(e.hookDescriptors, name)
+
+	return true
+}
+
+func (e *DebuggingEvent) SetModifier(name string, modifierDescriptor ModifierDescriptor) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.modifierDescriptors[name] = modifierDescriptor
+
+	return nil
 }
 
 func (e *DebuggingEvent) SetRegistered(registered bool) {
@@ -99,26 +144,39 @@ func (e *DebuggingEvent) GetKind() jdwp.EventKind {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	return e.Kind
+	return e.kind
 }
 
 func (e *DebuggingEvent) GetSuspendPolicy() jdwp.SuspendPolicy {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	return e.SuspendPolicy
+	return e.suspendPolicy
 }
 
-func (e *DebuggingEvent) GetModifiers() []jdwp.EventModifier {
+func (e *DebuggingEvent) GetHookDescriptors() map[string]string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	var modifiers = []jdwp.EventModifier{}
-	for _, modifier := range e.Modifiers {
-		modifiers = append(modifiers, modifier)
+	var descriptors = map[string]string {}
+	for key, value := range e.hookDescriptors {
+		descriptors[key] = value
 	}
 	
-	return modifiers
+	return descriptors
+}
+
+
+func (e *DebuggingEvent) GetModifiers() map[string]ModifierDescriptor {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var descriptors = map[string]ModifierDescriptor{}
+	for key, value := range e.modifierDescriptors {
+		descriptors[key] = value
+	}	
+	
+	return descriptors
 }
 
 func (e *DebuggingEvent) GetRegistered() bool {
@@ -132,7 +190,7 @@ func (e *DebuggingEvent) DeleteModifier(name string) error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	
-	_, ok := e.Modifiers[name]
+	_, ok := e.modifierDescriptors[name]
 	if !ok {
 		log.Printf("modifier %s cannot be found\n", name)
 		return JdwpDebuggingEventError{
@@ -140,7 +198,7 @@ func (e *DebuggingEvent) DeleteModifier(name string) error {
 		}
 	}
 
-	delete(e.Modifiers, name)
+	delete(e.modifierDescriptors, name)
 
 	return nil
 }
@@ -154,16 +212,55 @@ func (e *DebuggingEvent) Run() (context.Context, error) {
 	e.cancel = contextCancel
 
 	var modifiers []jdwp.EventModifier
-	for _, modifier := range e.Modifiers {
-		modifiers = append(modifiers, modifier)
+	for _, descriptor := range e.modifierDescriptors {
+		var newModifier jdwp.EventModifier
+		switch descriptor.IsField {
+		case true:
+			newModifier = jdwp.FieldOnlyEventModifier {
+				Type: jdwp.ReferenceTypeID(descriptor.ClassId),
+				Field: jdwp.FieldID(descriptor.ObjectId),
+			}
+		case false:
+			newModifier = jdwp.LocationOnlyEventModifier(jdwp.Location {
+				Type: descriptor.Kind,
+				Class: jdwp.ClassID(descriptor.ClassId),
+				Method: jdwp.MethodID(descriptor.ObjectId),
+				Location: 0,
+			})
+		}
+
+		modifiers = append(modifiers, newModifier)
+	}
+
+	var builder = NewPluginRunnerBuilder()
+	for hookName, hookPath := range e.hookDescriptors {
+		err := builder.AddLocation(hookName, hookPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	runner, err := builder.Build()
+	if err != nil {
+		log.Printf("unable to load plugins: %s", err)
+		return nil, err
+	}
+	
+	hook := func(event jdwp.Event) bool {
+		err := runner.Entrypoint(event)
+		if err != nil {
+			log.Printf("running for event %v caused errors: %s\n", event, err)
+			return false
+		}
+		return true
 	}
 
 	go func() {
 		err := e.conn.WatchEvents(
 			eventContext,
-			e.Kind,
-			e.SuspendPolicy,
-			e.hook,
+			e.kind,
+			e.suspendPolicy,
+			hook,
 			modifiers...)
 		if err != nil {
 			log.Printf("event %s finished with error: %s\n", e.Name, err)

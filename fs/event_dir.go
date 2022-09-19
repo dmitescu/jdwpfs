@@ -8,11 +8,12 @@ import (
 	"errors"
 	"log"
 	"syscall"
-	
+
 	"disroot.org/kitzman/jdwpfs/debug"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	jdwp "github.com/omerye/gojdb/jdwp"
 )
 
 //
